@@ -1,0 +1,17 @@
+{
+  "name": "tiktok_hero_crawler",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ulixee/execute-js-plugin": "^2.0.0-alpha.28",
+    "@ulixee/hero-playground": "^2.0.0-alpha.28",
+    "@ulixee/real-user-agents": "^2.0.0-alpha.28"
+  }
+}
