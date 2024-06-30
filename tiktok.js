@@ -1,5 +1,6 @@
 const Hero = require('@ulixee/hero-playground');
 const ExecuteJsPlugin = require('@ulixee/execute-js-plugin');
+const fs = require('fs');
 
 
 async function generateXBogus(hero, url) {
@@ -95,9 +96,68 @@ async function makeRequestCallback(url, method, headers) {
   return fetch(url, { method: method, headers: headers }).then(response => response.text());
 }
 
+async function prepareDefaultRequestHeaders(hero) {
+  const userAgent      = await hero.executeJs(() => navigator.userAgent);
+  const language       = await hero.executeJs(() => navigator.language || navigator.userLanguage);
+  const secChUaHeaders = await generateSecChUaHeaders(hero);
+  const cookieString   = await getSessionCookieString(hero);
 
-async function searchUsersByKeyword(hero, keyword) {
-  /* ----------------CAPTCHA PART START ---------------- */
+  return {
+    'Accept-Encoding': 'gzip, deflate, br, zstd',
+    'Accept-Language': language,
+    'Cookie': cookieString,
+    'Referer': 'https://www.tiktok.com/',
+    ...secChUaHeaders,
+    'User-Agent': userAgent,
+  };
+}
+
+async function initHero(profilePath = null, proxyIp = null, startUrl = 'https://www.tiktok.com/search/user?q=ugc') {
+  let profile = null;
+
+  if (profilePath) {
+    const rawProfileJson = fs.readFileSync(profilePath, 'utf-8');
+    profile = JSON.parse(rawProfileJson);
+  }
+
+  let heroConfig = { showChrome: true }
+
+  if (profile) {
+    heroConfig.userProfile = profile;
+  } else {
+    heroConfig = {
+      ...heroConfig,
+      userProfile: {
+        deviceProfile: {
+          webGlParameters: {
+            37445: 'Google Inc. (Apple)',
+            37446: 'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)',
+          }
+        },
+      },
+    }
+  }
+
+  if (proxyIp) {
+    heroConfig = {
+      ...heroConfig,
+      upstreamProxyUrl: `http://${proxyIp}:8888`,
+      upstreamProxyIpMask: {
+        proxyIp: proxyIp // For WebRTC IP masking
+      },
+      timezoneId: 'America/New_York', // TODO: find a way to get this from the proxy
+    }
+  }
+
+  console.log('Starting Hero with config:', heroConfig);
+
+  const hero = new Hero(heroConfig);
+
+  hero.use(ExecuteJsPlugin);
+
+  /* ---------------------------------------------------------------------------  */
+  /* ----------------------- CAPTCHA BYPASSING PART START ----------------------- */
+
   let isCaptchaPresent = false;
 
   hero.activeTab.on('resource', (resource) => {
@@ -108,7 +168,7 @@ async function searchUsersByKeyword(hero, keyword) {
   });
 
   async function checkAndRefresh() {
-    await hero.goto(`https://www.tiktok.com/search/user?q=${keyword}`);
+    await hero.goto(startUrl);
     await hero.waitForPaintingStable();
     await hero.waitForMillis(5000 * 1.5); // TODO: find better way to wait enough time for captcha to load
 
@@ -122,53 +182,90 @@ async function searchUsersByKeyword(hero, keyword) {
   await checkAndRefresh();
 
   console.log("Captcha resolved, proceeding with the next steps.");
-  /* ----------------CAPTCHA PART END ---------------- */
+  /* ----------------------- CAPTCHA BYPASSING PART END -----------------------  */
+  /* --------------------------------------------------------------------------  */
 
+  return hero;
+}
 
-  let userCounter = 0;
-  let usernames = [];
-
-  const userAgent      = await hero.executeJs(() => navigator.userAgent);
-  const language       = await hero.executeJs(() => navigator.language || navigator.userLanguage);
-  const secChUaHeaders = await generateSecChUaHeaders(hero);
-  const cookieString   = await getSessionCookieString(hero);
-
-  const searchRequestHeaders = {
+async function searchUsersByKeyword(hero, keyword, cursor = 0, searchId = null) {
+  const headers = {
+    ...await prepareDefaultRequestHeaders(hero),
     'Accept': '*/*',
-    'Accept-Encoding': 'gzip, deflate, br, zstd',
-    'Accept-Language': language,
-    'Cookie': cookieString,
     'Referer': `https://www.tiktok.com/search/user?q=${keyword}`,
-    ...secChUaHeaders,
     'Sec-Fetch-Dest': 'empty',
     'Sec-Fetch-Mode': 'cors',
     'Sec-Fetch-Site': 'same-origin',
-    'User-Agent': userAgent,
   };
 
   const defaultParams = await generateSessionParams(hero);
+  const params = {
+    ...defaultParams,
+    ...(searchId && { search_id: searchId }),
+    "cursor": cursor,
+    "keyword": keyword,
+    "referer": `https://www.tiktok.com/search/user?q=${keyword}`,
+    'web_search_code': '{"tiktok":{"client_params_x":{"search_engine":{"ies_mt_user_live_video_card_use_libra":1,"mt_search_general_user_live_card":1}},"search_server":{}}}'
+  };
+
+  const encodedParams = new URLSearchParams(params).toString();
+  const url = `https://www.tiktok.com/api/search/user/full/?${encodedParams}`;
+
+  const xBogus = await generateXBogus(hero, url);
+  const signedUrl = signUrl(url, xBogus);
+
+  const result = JSON.parse(await hero.executeJs(makeRequestCallback, signedUrl, 'GET', headers));
+
+  return result;
+}
+
+async function getUserInfo(hero, username) {
+  const headers = {
+    ...await prepareDefaultRequestHeaders(hero),
+    'Accept': 'text/html,application/xhtml+xml,application/xml',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+  };
+
+  const url = `https://www.tiktok.com/@${username}`;
+
+  const resultHtml = await hero.executeJs(makeRequestCallback, url, 'GET', headers);
+
+  const resultJson = await hero.executeJs((html) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, 'text/html');
+    const scriptTag = doc.querySelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__');
+    if (scriptTag) {
+      return JSON.parse(scriptTag.textContent);
+    }
+    return null;
+  }, resultHtml);
+
+  return resultJson;
+}
+
+
+(async () => {
+  // const proxyIp = "3.219.185.98";
+  // const profilePath = "profile.json";
+
+  // const hero = await initHero(profilePath, proxyIp);
+  const hero = await initHero();
+
+  const KEYWORD = 'ugc';
 
   let cursor = 0;
   let hasMore = true;
   let searchId = null;
 
+  let usernames = [];
+  let userCounter = 0;
+
   while (hasMore) {
-    const params = {
-      ...defaultParams,
-      ...(searchId && { search_id: searchId }),
-      "cursor": cursor,
-      "keyword": keyword,
-      "referer": `https://www.tiktok.com/search/user?q=${keyword}`,
-      'web_search_code': '{"tiktok":{"client_params_x":{"search_engine":{"ies_mt_user_live_video_card_use_libra":1,"mt_search_general_user_live_card":1}},"search_server":{}}}'
-    };
-
-    const encodedParams = new URLSearchParams(params).toString();
-    const url = `https://www.tiktok.com/api/search/user/full/?${encodedParams}`;
-
-    const xBogus = await generateXBogus(hero, url);
-    const signedUrl = signUrl(url, xBogus);
-
-    const result = JSON.parse(await hero.executeJs(makeRequestCallback, signedUrl, 'GET', searchRequestHeaders));
+    const result = await searchUsersByKeyword(hero, KEYWORD, cursor, searchId)
 
     console.log(result);
 
@@ -180,7 +277,7 @@ async function searchUsersByKeyword(hero, keyword) {
 
     if (result.has_more) {
       cursor = result.cursor;
-      // searchId = result.rid;
+      searchId = result.rid;
       // Sleep for 5 seconds before making the next request
       await hero.waitForMillis(5000);
     } else {
@@ -189,78 +286,22 @@ async function searchUsersByKeyword(hero, keyword) {
   }
 
   console.log(`Total users found: ${userCounter}`);
-
-  console.log(usernames);
+  console.log('Usernames:', usernames);
 
   for (const [index, username] of usernames.entries()) {
     console.log(`Processing User ${index + 1}: ${username}...`);
 
-    const cookieString = await getSessionCookieString(hero);
+    const result = await getUserInfo(hero, username);
 
-    const userRequestHeaders = {
-      'Accept': 'text/html,application/xhtml+xml,application/xml',
-      'Accept-Encoding': 'gzip, deflate, br, zstd',
-      'Accept-Language': language,
-      'Cookie': cookieString,
-      'Referer': `https://www.tiktok.com/`,
-      ...secChUaHeaders,
-      'Sec-Fetch-Dest': 'document',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Site': 'same-origin',
-      'Sec-Fetch-User': '?1',
-      'Upgrade-Insecure-Requests': '1',
-      'User-Agent': userAgent,
-    };
-
-    const url = `https://www.tiktok.com/@${username}`;
-
-    const resultHtml = await hero.executeJs(makeRequestCallback, url, 'GET', userRequestHeaders);
-
-    const resultJson = await hero.executeJs((html) => {
-      const parser = new DOMParser();
-      const doc = parser.parseFromString(html, 'text/html');
-      const scriptTag = doc.querySelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__');
-      if (scriptTag) {
-        return JSON.parse(scriptTag.textContent);
-      }
-      return null;
-    }, resultHtml);
-
-    await hero.waitForMillis(500);
-
-    if (resultJson) {
-      console.log('User info fetched successfully for', username, resultJson);
+    if (result) {
+      console.log('User info fetched successfully for', username, result['__DEFAULT_SCOPE__']['webapp.user-detail'].userInfo);
     } else {
       console.log('Failed to fetch user info for', username);
-    }
+    };
+
+    await hero.waitForMillis(500);
   };
-}
 
-
-(async () => {
-  const proxyIp = "3.219.185.98"
-
-  const hero = new Hero({
-    showChrome: false,
-    userAgent: '~ chrome >= 120 && mac >= 12',
-    upstreamProxyUrl: `http://${proxyIp}:8888`,
-    upstreamProxyIpMask: {
-      proxyIp: proxyIp // For WebRTC IP masking
-    },
-    timezoneId: 'America/New_York',
-    userProfile: {
-      deviceProfile: {
-        webGlParameters: {
-          37445: 'Google Inc. (Apple)',
-          37446: 'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)',
-        }
-      },
-    },
-  });
-
-  hero.use(ExecuteJsPlugin);
-
-  await searchUsersByKeyword(hero, 'ugc');
 
   await hero.close();
 })();
