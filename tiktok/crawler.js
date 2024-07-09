@@ -1,8 +1,3 @@
-const Hero = require('@ulixee/hero-playground');
-const ExecuteJsPlugin = require('@ulixee/execute-js-plugin');
-const fs = require('fs');
-
-
 async function generateXBogus(hero, url) {
   const xBogus = await hero.executeJs((url) => {
     if (window.byted_acrawler !== undefined) {
@@ -112,82 +107,6 @@ async function prepareDefaultRequestHeaders(hero) {
   };
 }
 
-async function initHero(profilePath = null, proxyIp = null, startUrl = 'https://www.tiktok.com/search/user?q=ugc') {
-  let profile = null;
-
-  if (profilePath) {
-    const rawProfileJson = fs.readFileSync(profilePath, 'utf-8');
-    profile = JSON.parse(rawProfileJson);
-  }
-
-  let heroConfig = { showChrome: true }
-
-  if (profile) {
-    heroConfig.userProfile = profile;
-  } else {
-    heroConfig = {
-      ...heroConfig,
-      userProfile: {
-        deviceProfile: {
-          webGlParameters: {
-            37445: 'Google Inc. (Apple)',
-            37446: 'ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)',
-          }
-        },
-      },
-    }
-  }
-
-  if (proxyIp) {
-    heroConfig = {
-      ...heroConfig,
-      upstreamProxyUrl: `http://${proxyIp}:8888`,
-      upstreamProxyIpMask: {
-        proxyIp: proxyIp // For WebRTC IP masking
-      },
-      timezoneId: 'America/New_York', // TODO: find a way to get this from the proxy
-    }
-  }
-
-  console.log('Starting Hero with config:', heroConfig);
-
-  const hero = new Hero(heroConfig);
-
-  hero.use(ExecuteJsPlugin);
-
-  /* ---------------------------------------------------------------------------  */
-  /* ----------------------- CAPTCHA BYPASSING PART START ----------------------- */
-
-  let isCaptchaPresent = false;
-
-  hero.activeTab.on('resource', (resource) => {
-    if (resource.url.includes('https://verification-va.tiktok.com/captcha') ||
-        resource.url.includes('https://verification.tiktokw.us/captcha/')) {
-      isCaptchaPresent = true;
-    }
-  });
-
-  async function checkAndRefresh() {
-    await hero.goto(startUrl);
-    await hero.waitForPaintingStable();
-    await hero.waitForMillis(5000 * 1.5); // TODO: find better way to wait enough time for captcha to load
-
-    if (isCaptchaPresent) {
-      console.log("Captcha detected, refreshing page...");
-      isCaptchaPresent = false;
-      await checkAndRefresh();
-    }
-  }
-
-  await checkAndRefresh();
-
-  console.log("Captcha resolved, proceeding with the next steps.");
-  /* ----------------------- CAPTCHA BYPASSING PART END -----------------------  */
-  /* --------------------------------------------------------------------------  */
-
-  return hero;
-}
-
 async function searchUsersByKeyword(hero, keyword, cursor = 0, searchId = null) {
   const headers = {
     ...await prepareDefaultRequestHeaders(hero),
@@ -248,60 +167,4 @@ async function getUserInfo(hero, username) {
 }
 
 
-(async () => {
-  // const proxyIp = "3.219.185.98";
-  // const profilePath = "profile.json";
-
-  // const hero = await initHero(profilePath, proxyIp);
-  const hero = await initHero();
-
-  const KEYWORD = 'ugc';
-
-  let cursor = 0;
-  let hasMore = true;
-  let searchId = null;
-
-  let usernames = [];
-  let userCounter = 0;
-
-  while (hasMore) {
-    const result = await searchUsersByKeyword(hero, KEYWORD, cursor, searchId)
-
-    console.log(result);
-
-    if (result.user_list) {
-      console.log(`Found +${result.user_list.length} users.`);
-      userCounter += result.user_list.length;
-      usernames = usernames.concat(result.user_list.map(user => user.user_info.unique_id));
-    };
-
-    if (result.has_more) {
-      cursor = result.cursor;
-      searchId = result.rid;
-      // Sleep for 5 seconds before making the next request
-      await hero.waitForMillis(5000);
-    } else {
-      hasMore = false;
-    }
-  }
-
-  console.log(`Total users found: ${userCounter}`);
-  console.log('Usernames:', usernames);
-
-  for (const [index, username] of usernames.entries()) {
-    console.log(`Processing User ${index + 1}: ${username}...`);
-
-    const result = await getUserInfo(hero, username);
-
-    if (result) {
-      console.log('User info fetched successfully for', username, result['__DEFAULT_SCOPE__']['webapp.user-detail'].userInfo);
-    } else {
-      console.log('Failed to fetch user info for', username);
-    };
-
-    await hero.waitForMillis(500);
-  };
-
-
-  await hero.close();
-})();
+module.exports = { searchUsersByKeyword, getUserInfo };
